@@ -1,0 +1,20 @@
+{
+  "name": "reviewbot",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "db:generate": "turbo --filter=@reviewbot/db db:generate",
+    "db:migrate": "turbo --filter=@reviewbot/db db:migrate",
+    "db:studio": "turbo --filter=@reviewbot/db db:studio"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "npm@10.9.2"
+}
