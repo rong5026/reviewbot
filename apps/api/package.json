@@ -1,0 +1,22 @@
+{
+  "name": "@reviewbot/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "start": "bun dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "@octokit/app": "^15.1.1",
+    "@octokit/rest": "^21.1.1",
+    "@reviewbot/db": "*",
+    "hono": "^4.7.4",
+    "stripe": "^17.7.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.2"
+  }
+}
