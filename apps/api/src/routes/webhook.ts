@@ -4,7 +4,7 @@ import { reviewPR } from '../services/review';
 import { getInstallationClient } from '../services/github';
 import { getDb } from '@reviewbot/db';
 import { orgs, repos, reviews } from '@reviewbot/db';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, lt, sql } from 'drizzle-orm';
 import type { Org } from '@reviewbot/db';
 
 const router = new Hono();
@@ -72,26 +72,7 @@ router.post('/github', async (c) => {
     org.reviewsUsedThisMonth = 0;
   }
 
-  // Check free tier limits
-  if (org.planTier === 'free' && org.reviewsUsedThisMonth >= 10) {
-    const github = await getInstallationClient(installationId);
-    const [owner, repo] = payload.repository.full_name.split('/');
-    await github.rest.issues.createComment({
-      owner,
-      repo,
-      issue_number: payload.pull_request.number,
-      body: [
-        '## ReviewBot ⚠️ Free Tier Limit Reached',
-        '',
-        `You've used all **10 free reviews** this month for **${org.githubOrgLogin}**.`,
-        '',
-        '[**Upgrade to Pro**](' + (process.env.APP_URL ?? 'https://reviewbot.app') + '/billing) for unlimited reviews at $15/developer/month.',
-      ].join('\n'),
-    });
-    return c.json({ ok: true });
-  }
-
-  // Ensure repo record exists (auto-enable)
+  // Ensure repo record exists (auto-enable on first PR)
   await db
     .insert(repos)
     .values({
@@ -133,6 +114,41 @@ async function processReview(opts: {
   const db = getDb();
   const [owner, repoName] = repoFullName.split('/');
   const github = await getInstallationClient(installationId);
+
+  // Atomically claim a review slot to prevent race conditions under concurrent PRs.
+  // For free orgs: single UPDATE ... WHERE usage < 10 RETURNING — if 0 rows updated,
+  // the limit was already reached by a concurrent request.
+  if (org.planTier === 'free') {
+    const claimed = await db
+      .update(orgs)
+      .set({ reviewsUsedThisMonth: sql`${orgs.reviewsUsedThisMonth} + 1` })
+      .where(and(eq(orgs.id, org.id), lt(orgs.reviewsUsedThisMonth, 10)))
+      .returning({ id: orgs.id });
+
+    if (claimed.length === 0) {
+      await github.rest.issues.createComment({
+        owner,
+        repo: repoName,
+        issue_number: pr.number,
+        body: [
+          '## ReviewBot ⚠️ Free Tier Limit Reached',
+          '',
+          `You've used all **10 free reviews** this month for **${org.githubOrgLogin}**.`,
+          '',
+          '[**Upgrade to Pro**](' +
+            (process.env.APP_URL ?? 'https://reviewbot.app') +
+            '/billing) for unlimited reviews at $15/developer/month.',
+        ].join('\n'),
+      });
+      return;
+    }
+  } else {
+    // Pro/Team: uncapped — just track usage
+    await db
+      .update(orgs)
+      .set({ reviewsUsedThisMonth: sql`${orgs.reviewsUsedThisMonth} + 1` })
+      .where(eq(orgs.id, org.id));
+  }
 
   // Fetch PR diff
   const diffResp = await github.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
@@ -186,7 +202,9 @@ async function processReview(opts: {
     reviewResult.summary,
     '',
     '---',
-    `*Powered by [ReviewBot](${process.env.APP_URL ?? 'https://reviewbot.app'}) · [Dashboard](${process.env.APP_URL ?? 'https://reviewbot.app'}/dashboard)*`,
+    `*Powered by [ReviewBot](${process.env.APP_URL ?? 'https://reviewbot.app'}) · [Dashboard](${
+      process.env.APP_URL ?? 'https://reviewbot.app'
+    }/dashboard)*`,
   ].join('\n');
 
   const commentResp = await github.rest.issues.createComment({
@@ -196,7 +214,7 @@ async function processReview(opts: {
     body: commentBody,
   });
 
-  // Post inline review comments (best-effort)
+  // Post inline review comments (best-effort — diff positions can go stale)
   if (reviewResult.inlineComments.length > 0) {
     try {
       await github.rest.pulls.createReview({
@@ -229,12 +247,6 @@ async function processReview(opts: {
     tokensUsed: reviewResult.tokensUsed,
     durationMs: Date.now() - start,
   });
-
-  // Increment usage counter
-  await db
-    .update(orgs)
-    .set({ reviewsUsedThisMonth: org.reviewsUsedThisMonth + 1 })
-    .where(eq(orgs.id, org.id));
 }
 
 export default router;
