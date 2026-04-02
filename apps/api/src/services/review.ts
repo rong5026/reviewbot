@@ -28,6 +28,46 @@ Review dimensions (in priority order):
 
 Be direct. Reference exact file paths and line numbers. Omit praise.`;
 
+const REVIEW_TOOL: Anthropic.Tool = {
+  name: 'submit_review',
+  description: 'Submit the completed code review result.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      summary: {
+        type: 'string',
+        description:
+          '2-3 sentence assessment. Start with overall quality, then call out the most important issue if any.',
+      },
+      riskLevel: {
+        type: 'string',
+        enum: ['low', 'medium', 'high', 'critical'],
+        description:
+          'critical=security/data-loss risk, high=likely production failure, medium=non-urgent bugs, low=style/minor',
+      },
+      inlineComments: {
+        type: 'array',
+        description: "Max 8 items. Only genuine issues worth a developer's attention.",
+        items: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path relative to repo root' },
+            line: { type: 'integer', description: 'Line number in the diff' },
+            body: {
+              type: 'string',
+              description:
+                'Issue description with suggested fix. Prefix with [ERROR], [WARNING], or [INFO].',
+            },
+            severity: { type: 'string', enum: ['info', 'warning', 'error'] },
+          },
+          required: ['path', 'line', 'body', 'severity'],
+        },
+      },
+    },
+    required: ['summary', 'riskLevel', 'inlineComments'],
+  },
+};
+
 export async function reviewPR(opts: {
   prTitle: string;
   prDescription: string;
@@ -46,51 +86,25 @@ export async function reviewPR(opts: {
     model: 'claude-sonnet-4-6',
     max_tokens: 4096,
     system: SYSTEM_PROMPT,
+    tools: [REVIEW_TOOL],
+    // Force Claude to always call submit_review — no free-text fallback
+    tool_choice: { type: 'tool', name: 'submit_review' },
     messages: [
       {
         role: 'user',
-        content: `Review this pull request and return a JSON response.
-
-**Repo:** ${repoFullName}  
-**PR #${prNumber}:** ${prTitle}  
-**Description:** ${prDescription || '(no description)'}
-
-**Diff:**
-\`\`\`diff
-${truncatedDiff}
-\`\`\`
-
-Respond with ONLY valid JSON (no markdown fence):
-{
-  "summary": "2-3 sentence assessment. Start with the overall quality, then call out the most important issue if any.",
-  "riskLevel": "low|medium|high|critical",
-  "inlineComments": [
-    {
-      "path": "path/to/file.ts",
-      "line": 42,
-      "body": "**[ERROR|WARNING|INFO]** Specific issue. Suggested fix or explanation.",
-      "severity": "error|warning|info"
-    }
-  ]
-}
-
-Rules:
-- Max 8 inline comments. Only for genuine issues.
-- riskLevel = critical if there are security vulnerabilities or data loss risks.
-- riskLevel = high if there are logic bugs likely to cause production failures.
-- riskLevel = medium for issues that will cause problems but are not urgent.
-- riskLevel = low for style or minor improvements.
-- If the PR looks good, say so in the summary and return empty inlineComments.`,
+        content: `Review this pull request.\n\n**Repo:** ${repoFullName}  \n**PR #${prNumber}:** ${prTitle}  \n**Description:** ${
+          prDescription || '(no description)'
+        }\n\n**Diff:**\n\`\`\`diff\n${truncatedDiff}\n\`\`\``,
       },
     ],
   });
 
-  const content = response.content[0];
-  if (content.type !== 'text') throw new Error('Unexpected response type from Claude');
+  const toolUse = response.content.find((c) => c.type === 'tool_use');
+  if (!toolUse || toolUse.type !== 'tool_use') {
+    throw new Error('Claude did not return a tool_use block');
+  }
 
-  // Parse JSON — strip any accidental markdown fences
-  const cleaned = content.text.replace(/^```[\w]*\n?/m, '').replace(/\n?```$/m, '').trim();
-  const parsed = JSON.parse(cleaned) as {
+  const parsed = toolUse.input as {
     summary: string;
     riskLevel: ReviewResult['riskLevel'];
     inlineComments: ReviewComment[];
